@@ -1,0 +1,697 @@
+---
+title: "Sample Size"
+author: "James Totterdell"
+date: "`r Sys.Date()`"
+output: 
+  bookdown::pdf_document2:
+    fig_align: center
+    fig_height: 2.5
+    fig_width: 6
+geometry: margin = 0.75in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+
+library(binbayesrct)
+library(tidyverse)
+library(grid)
+library(gtable)
+library(parallel)
+library(kableExtra)
+
+theme_set(theme_grey(base_size = 9) +
+            theme(legend.key.height = unit(0.5, "lines"),
+                  legend.background = element_blank(),
+                  panel.spacing = unit(1/5, "lines"),
+                  panel.grid.major = element_line(colour = "grey90"),
+                  panel.grid.minor = element_blank(),
+                  panel.background = element_rect(colour = "grey95", fill = "grey95")))
+
+
+add_facet_labels <- function(g, label_top = NULL, label_right = NULL) {
+  if(is.null(label_top) & is.null(label_right)) break
+  if(!is.null(label_top)) {
+    posT <- subset(g$layout, grepl("strip-t", name), select = t:r)
+    height <- g$heights[min(posT$t)]  # height of current top strips
+    g <- gtable_add_rows(g, height, min(posT$t)-1)
+    stripT <- gTree(name = "Strip_top", children = gList(
+      rectGrob(gp = gpar(col = NA, fill = "grey95")),
+      textGrob(label_top, gp = gpar(fontsize = 10, col = "grey10"))))
+    g <- gtable_add_grob(g, stripT, t = min(posT$t), l = min(posT$l), r = max(posT$r), name = "strip-top")
+    g <- gtable_add_rows(g, unit(1/5, "line"), min(posT$t))
+  }
+  if(!is.null(label_right)) {
+    posR <- subset(g$layout, grepl("strip-r", name), select = t:r)
+    width <- g$widths[max(posR$r)]    # width of current right strips
+    g <- gtable_add_cols(g, width, max(posR$r))  
+    stripR <- gTree(name = "Strip_right", children = gList(
+      rectGrob(gp = gpar(col = NA, fill = "grey85")),
+      textGrob(label_right, rot = -90, gp = gpar(fontsize = 10, col = "grey10"))))
+    g <- gtable_add_grob(g, stripR, t = min(posR$t)+1, l = max(posR$r) + 1, b = max(posR$b)+1, name = "strip-right")
+    g <- gtable_add_cols(g, unit(1/5, "line"), max(posR$r))
+  }
+  return(g)
+}
+```
+
+# Conditional Power Fixed Sample Size
+
+Just assuming a two arm case of $\theta_0$ in control and $\theta_1$ in treatment arms respectively.
+Interest is in
+$$
+H_0: \delta>0
+$$
+where $\delta = \theta_0 - \theta_1$.
+
+The Bayesian model assumed for the purposes of sample size calculation is:
+$$
+\begin{aligned}
+\theta_i &\sim \text{Beta}(\alpha_i, \beta_i) \\
+y_i|\theta_i;n_i &\sim \text{Binomial}(\theta_i, n_i) \\
+\theta_i|y_i;n_i &\sim \text{Beta}(\alpha_i + y_i, \beta_i + n_i - y_i)
+\end{aligned}
+$$
+for $i=0,1$. Although in practice, this would be a logistic regression model adjusting for relevant covariates.
+
+For reference, conditional classical sample size under assumed control proportion and effect size are given in Figure \@ref(fig:freqpow).
+Conditional Bayesian sample size assuming an uninformative prior will be very similar, i.e. $\mathbb E_{\theta_0,\theta_1}[\text{Pr}(\delta>0|y_0,y_1)>1-\alpha]\approx \mathbb E_{\theta_0,\theta_1}[\phi(y_0,y_1)]$.
+
+```{r, eval=F}
+beta_ineq_approx <- function(a, b, c, d, delta = 0) {
+  if(!(all(c(a, b, c, d) > 0))) stop("a, b, c, d must be > 0")
+  m1 <- a / (a + b)
+  v1 <- a*b / ( (a + b)^2 * (a + b + 1))
+  m2 <- c / (c + d)
+  v2 <- c*d / ( (c + d)^2 * (c + d + 1))
+  z <- (m1 - m2 - delta) / sqrt(v1 + v2)
+  return(stats::pnorm(z))
+}
+
+P <- outer(0:1000, 0:1000, function(x,y) dbinom(x, 1000, 0.2)*dbinom(y,1000,0.15))
+sigPid <- which(P > 1e-6, arr.ind = T)
+p1 <- sum(
+  apply(sigPid, 1, function(x) P[x[1], x[2]] * 
+        (Vectorize(beta_ineq_approx)(
+          x[1], 1000 - x[1], 
+          x[2], 1000 - x[2]) > 0.95))
+  )
+
+# Classical power
+y <- cbind(rbinom(1e5, 1000, 0.2), rbinom(1e5, 1000, 0.15))
+pvals <- apply(y, 1, function(x) prop.test(x, c(1000, 1000), alternative = "greater", correct = F)$p.val)
+mean(pvals < 0.05)
+
+# Conditional Bayesian Power
+p2 <- mean(apply(y, 1, function(x) beta_prob_supr(1 + x, 1 + 1000 - x, approx = T, reverse = T)) > 0.95)
+round(c(p1, p2), 3)
+
+t0 <- rbeta(1e5, 3, 12)
+t1 <- rbeta(1e5, 1.7625, 9.9875)
+hist(t0-t1,freq=F,col="grey50",border="grey50",breaks=100);abline(v=0.05)
+y <- cbind(rbinom(1e5, 1000, t0), rbinom(1e5, 1000, t1))
+# Expected classical power
+pvals <- apply(y, 1, function(x) prop.test(x, c(1000, 1000), alternative = "greater", correct = F)$p.val)
+mean(pvals < 0.05)
+
+# Expected Bayesian Power
+p3 <- mean(apply(y, 1, function(x) beta_prob_supr(1 + x, 1 + 1000 - x, approx = T, reverse = T)) > 0.95)
+
+# Expected Bayesian Power conditional on alternative being true
+hist((t0 - t1)[t0 - t1 > 0], breaks = 100, border = "grey50", col = "grey50"); abline(v = 0.05)
+m <- sum(t0 - t1>0)
+y <- cbind(rbinom(m, 1000, t0[t0 - t1>0]), rbinom(m, 1000, t1[t0 - t1>0]))
+p4 <- mean(apply(y, 1, function(x) beta_prob_supr(1 + x, 1 + 1000 - x, approx = T, reverse = T)) > 0.95)
+round(c(p1, p2, p3, p4), 3)
+```
+
+For example, assuming $\theta_0=0.2$ a reduction of $\delta=0.05$ would require about a sample size of 1,000 for 90% power.
+
+```{r freqpow, fig.cap="Frequentist power by sample size for given control proportion and effect size at level $\\alpha=0.05$."}
+power_grid <- rbind(
+  expand.grid(n = 1:1500, p1 = 0.1, p2 = seq(0, 0.1, 0.01)),
+  expand.grid(n = 1:1500, p1 = 0.15, p2 = seq(0.05, 0.15, 0.01)),
+  expand.grid(n = 1:1500, p1 = 0.2, p2 = seq(0.1, 0.2, 0.01))
+)
+power_grid$delta <- round(power_grid$p1 - power_grid$p2, 2)
+power_grid$power <- apply(power_grid, 1, function(x)
+  power.prop.test(x[1], x[2], x[3], alternative = "one.sided")$pow)
+
+p <- ggplot(power_grid,
+       aes(n, power)) +
+  facet_wrap( ~ p1) +
+  geom_line(aes(group = delta, colour = factor(delta))) +
+  scale_y_continuous("Power", breaks = seq(0, 1, 0.1), limits = c(0, 1)) +
+  scale_colour_viridis_d(bquote("Change, "*delta), begin = 0.1, end = 0.9, option = "A") +
+  labs(x = "Sample size in each arm")
+g <- ggplotGrob(p)
+g <- add_facet_labels(g, bquote("Control, "*theta[0]))
+grid.draw(g)
+```
+
+\clearpage
+
+# Group Sequential Sample Size
+
+We are interested in a group-sequential type design assuming two arms where effectiveness (or lack thereof) may be declared early if there is sufficient evidence.
+
+At each interim we would assess $\pi_t = \text{Pr}(\theta_0 - \theta_1 > 0|\mathcal{D}_t)$ and decide
+$$
+d^1_t = \begin{cases}
+1 & \text{if }\pi_t > \overline\epsilon_t \text{ (trigger superiority)} \\
+2 & \text{if }\pi_t < \underline\epsilon_t \text{ (trigger inferiority)} \\
+0 & \text{if }\pi_t \in [\underline\epsilon_t,\overline\epsilon_t] \text{ (continue)}.
+\end{cases}
+$$
+
+Additionally, we could consider $\varpi_t = \text{Pr}(\lvert\theta_0-\theta_1\rvert<\Delta|\mathcal{D}_t)$ and decide
+$$
+d^2_t = \begin{cases}
+1 & \text{if }\varpi_t > \kappa_t\text{ and }d_t^1=0 \text{ (trigger equivalence)} \\
+0 & \text{if }\varpi_t \leq \kappa_t\text{ and }d_t^1=0 \text{ (continue)}.
+\end{cases}
+$$
+
+The results assume two arms with fixed 1:1 allocation.
+If other arms are added as the trial progresses, either the maximum sample size would need to be increased to accommodate the arm, or power would be reduced compared to what is displayed here.
+
+The results are idealistic in that they assume no drop-out and no missing information at each interim analysis.
+The actually amount of missing data will be dependent on the accrual rate and time to primary endpoint.
+Early outcome data could be used to impute missing primary endpoint data for participants already enrolled at the time of the interim.
+
+\clearpage
+
+
+```{r}
+beta_prob_equi_monte <- function(a, b, d = 0.05, sims = 1e4) {
+  if(!(all(c(a, b) > 0))) stop("a, b, must be > 0")
+  p <- length(a)
+  D <- matrix(rbeta(p*sims, a, b), sims, p, byrow = T)
+  D <- sweep(D[, -1, drop = F], 1, D[, 1])
+  ans <- drop(apply(D, 2, function(x) mean(abs(x) < d)))
+  return(ans)
+}
+
+gst <- function(p0, p1, nseq = 1000, d = 0.025) {
+  K <- length(nseq)
+  nnew <- diff(c(0, nseq))
+  y0 <- 0
+  y1 <- 0
+  p_supr <- numeric(K)
+  p_equi <- numeric(K)
+  for(i in 1:K) {
+    y0 <- y0 + rbinom(1, nnew[i]/2, p0)
+    y1 <- y1 + rbinom(1, nnew[i]/2, p1)
+    y <- c(y0, y1)
+    p_supr[i] <- beta_prob_supr(1 + y, 1 + nseq[i]/2 - y, reverse = TRUE, approx = TRUE)
+    p_equi[i] <- beta_prob_equi_monte(1 + y, 1 + nseq[i]/2 - y, d = d)
+  }
+  return(data.frame(interim = 1:K, p_supr = p_supr, p_equi = p_equi))
+}
+
+decide <- function(res, eps_sup, eps_inf, eps_equ) {
+  res %>%
+    group_by(trial) %>%
+    mutate(
+      superior = p_supr > eps_sup,
+      inferior = p_supr < eps_inf,
+      equivalent = p_equi > eps_equ,
+      result = case_when(
+        superior ~ "superior",
+        inferior ~ "inferior",
+        equivalent & !(inferior | superior) ~ "equivalent",
+        TRUE ~ "continue"
+      ),
+      triggered = superior | inferior | equivalent,
+    ) %>%
+    group_by(trial) %>%
+    mutate(early = if_else(any(triggered), interim[triggered][1] < max(interim), FALSE)) %>%
+    slice(1:min(which(triggered), max(interim))) %>%
+    ungroup() %>%
+    mutate(trial = as.integer(trial)) %>%
+    arrange(trial)
+}
+
+count_decide <- function(dec) {
+  dec %>% 
+    select(trial, interim, result) %>% 
+    count(interim, result) %>% 
+    complete(interim, result, fill = list(n = 0)) %>%
+    group_by(interim) %>%
+    mutate(p = n / sum(n)) %>%
+    group_by(result) %>%
+    mutate(cn = if_else(result == "continue", n, cumsum(n))) %>%
+    group_by(interim) %>%
+    mutate(cp = cn / sum(cn))
+}
+
+
+count_ss <- function(dec) {
+  dec %>% 
+    group_by(trial) %>% 
+    slice(n()) %>% 
+    ungroup() %>% 
+    count(interim, result) %>% 
+    mutate(p = n / sum(n), 
+           ss = interim*200)
+}
+
+
+result_summary <- function(dec) {
+  dec %>% 
+    group_by(trial) %>% 
+    slice(n()) %>%  
+    ungroup() %>% 
+    summarise_if(is.logical, mean)
+}
+
+trigger_superior <- function(res) {
+  res %>%
+    select(trial, interim, p_supr) %>%
+    mutate(
+      `0.950` = p_supr > 0.95,
+      `0.960` = p_supr > 0.96,
+      `0.970` = p_supr > 0.97,
+      `0.980` = p_supr > 0.98,
+      `0.990` = p_supr > 0.99,
+      `0.995` = p_supr > 0.995
+    ) %>%
+    group_by(trial) %>%
+    summarise_if(is.logical, findfirst) %>%
+    gather(x, interim, -trial) %>%
+    count(x, interim, .drop = F) %>%
+    ungroup() %>%
+    complete(x, interim = 1:15, fill = list(n = 0)) %>%
+    group_by(x) %>%
+    mutate(p = n / sum(n),
+           cp = cumsum(p)) %>%
+    ungroup() %>%
+    mutate(x = as.numeric(x))
+}
+
+sims <- 1e4
+
+res_null <- mclapply(1:sims, function(i) gst(0.2, 0.2, seq(200, 3000, 200)), mc.cores = 14)
+res_null <- bind_rows(res_null, .id = "trial")
+dec0_null <- decide(res_null, 0.95, 0.05, 0.95)
+dec1_null <- decide(res_null, 0.99, 0.01, 0.9)
+dec2_null <- decide(res_null, 0.99, 0.05, 0.85)
+dec3_null <- decide(res_null, 0.99, 0.1, 0.85)
+dec4_null <- decide(res_null, 0.975^(1:15/15)^1.5, 1 - 0.9^(1:15/15)^1.5, 0.85)
+dec5_null <- decide(res_null, 0.95^(1:15/15)^3, 1 - 0.9^(1:15/15)^3, 0.85)
+
+res_small <- mclapply(1:sims, function(i) gst(0.2, 0.175, seq(200, 3000, 200)), mc.cores = 14)
+res_small <- bind_rows(res_small, .id = "trial")
+dec0_small <- decide(res_small, 0.95, 0.05, 0.95)
+dec1_small <- decide(res_small, 0.99, 0.01, 0.9)
+dec2_small <- decide(res_small, 0.99, 0.05, 0.85)
+dec3_small <- decide(res_small, 0.99, 0.1, 0.85)
+dec4_small <- decide(res_small, 0.975^(1:15/15)^1.5, 1 - 0.9^(1:15/15)^1.5, 0.85)
+dec5_small <- decide(res_small, 0.95^(1:15/15)^3, 1 - 0.9^(1:15/15)^3, 0.85)
+
+res_moderate <- mclapply(1:sims, function(i) gst(0.2, 0.15, seq(200, 3000, 200)), mc.cores = 14)
+res_moderate <- bind_rows(res_moderate, .id = "trial")
+dec0_moderate <- decide(res_moderate, 0.95, 0.05, 0.95)
+dec1_moderate <- decide(res_moderate, 0.99, 0.01, 0.9)
+dec2_moderate <- decide(res_moderate, 0.99, 0.05, 0.85)
+dec3_moderate <- decide(res_moderate, 0.99, 0.1, 0.85)
+dec4_moderate <- decide(res_moderate, 0.975^(1:15/15)^1.5, 1 - 0.9^(1:15/15)^1.5, 0.85)
+dec5_moderate <- decide(res_moderate, 0.95^(1:15/15)^3, 1 - 0.9^(1:15/15)^3, 0.85)
+
+res_large <- mclapply(1:sims, function(i) gst(0.2, 0.1, seq(200, 3000, 200)), mc.cores = 14)
+res_large <- bind_rows(res_large, .id = "trial")
+dec0_large <- decide(res_large, 0.95, 0.05, 0.95)
+dec1_large <- decide(res_large, 0.99, 0.01, 0.9)
+dec2_large <- decide(res_large, 0.99, 0.05, 0.85)
+dec3_large <- decide(res_large, 0.99, 0.1, 0.85)
+dec4_large <- decide(res_large, 0.975^(1:15/15)^1.5, 1 - 0.9^(1:15/15)^1.5, 0.85)
+dec5_large <- decide(res_large, 0.95^(1:15/15)^3, 1 - 0.9^(1:15/15)^3, 0.85)
+```
+
+
+
+```{r}
+bind_rows(
+  result_summary(dec0_null) %>% mutate(Scenario = "Null"),
+  result_summary(dec0_small) %>% mutate(Scenario = "Small"),
+  result_summary(dec0_moderate) %>% mutate(Scenario = "Moderate"),
+  result_summary(dec0_large) %>% mutate(Scenario = "Large")
+) %>%
+  select(Scenario, 1:5) %>%
+  kable(digits = 2, booktabs = T, caption = "Expected trial outcomes.") %>%
+  kable_styling(font_size = 9)
+```
+
+
+```{r, fig.cap="Expected trial progression under $(\\underline\\epsilon_t=0.05,\\overline\\epsilon_t=0.95,\\kappa_t=0.95,\\Delta=0.025)$."}
+bind_rows(
+  count_decide(dec0_null) %>% mutate(Scenario = "Null"),
+  count_decide(dec0_small) %>% mutate(Scenario = "Small"),
+  count_decide(dec0_moderate) %>% mutate(Scenario = "Moderate"),
+  count_decide(dec0_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large"))) %>%
+  ggplot(.,
+         aes(interim * 200, cp)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result, colour = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  labs(y = "Cumulative trial results", x = "Total sample size")
+```
+
+
+```{r, fig.cap="Distribution of trial sample sizes under $(\\underline\\epsilon_t=0.01,\\overline\\epsilon_t=0.99,\\kappa_t=0.9,\\Delta=0.025)$."}
+ssdat <- bind_rows(
+  count_ss(dec0_null) %>% mutate(Scenario = "Null"),
+  count_ss(dec0_small) %>% mutate(Scenario = "Small"),
+  count_ss(dec0_moderate) %>% mutate(Scenario = "Moderate"),
+  count_ss(dec0_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large")))
+essdat <- ssdat %>% 
+  group_by(Scenario) %>% 
+  summarise(Mean = sum(p*ss),
+            Median = median(rep.int(ss, n))) %>%
+  gather(Measure, value, -Scenario)
+
+ssdat %>%
+  ggplot(.,
+         aes(ss, p)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_manual("", values = c("Mean" = "black", "Median" = "black")) +
+  scale_linetype_manual("", values = c("Mean" = 1, "Median" = 2)) +
+  geom_vline(data = essdat, aes(xintercept = value, colour = Measure, linetype = Measure)) +
+  labs(y = "Proportion of trials", x = "Total sample size", colour = NULL)
+```
+
+\clearpage
+
+
+```{r}
+bind_rows(
+  result_summary(dec1_null) %>% mutate(Scenario = "Null"),
+  result_summary(dec1_small) %>% mutate(Scenario = "Small"),
+  result_summary(dec1_moderate) %>% mutate(Scenario = "Moderate"),
+  result_summary(dec1_large) %>% mutate(Scenario = "Large")
+) %>%
+  select(Scenario, 1:5) %>%
+  kable(digits = 2, booktabs = T, caption = "Expected trial outcomes.") %>%
+  kable_styling(font_size = 9)
+```
+
+
+```{r, fig.cap="Expected trial progression under $(\\underline\\epsilon_t=0.01,\\overline\\epsilon_t=0.99,\\kappa_t=0.9,\\Delta=0.025)$."}
+bind_rows(
+  count_decide(dec1_null) %>% mutate(Scenario = "Null"),
+  count_decide(dec1_small) %>% mutate(Scenario = "Small"),
+  count_decide(dec1_moderate) %>% mutate(Scenario = "Moderate"),
+  count_decide(dec1_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large"))) %>%
+  ggplot(.,
+         aes(interim * 200, cp)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result, colour = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  labs(y = "Cumulative trial results", x = "Total sample size")
+```
+
+
+```{r, fig.cap="Distribution of trial sample sizes under $(\\underline\\epsilon_t=0.01,\\overline\\epsilon_t=0.99,\\kappa_t=0.9,\\Delta=0.025)$."}
+ssdat <- bind_rows(
+  count_ss(dec1_null) %>% mutate(Scenario = "Null"),
+  count_ss(dec1_small) %>% mutate(Scenario = "Small"),
+  count_ss(dec1_moderate) %>% mutate(Scenario = "Moderate"),
+  count_ss(dec1_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large")))
+essdat <- ssdat %>% 
+  group_by(Scenario) %>% 
+  summarise(Mean = sum(p*ss),
+            Median = median(rep.int(ss, n))) %>%
+  gather(Measure, value, -Scenario)
+
+ssdat %>%
+  ggplot(.,
+         aes(ss, p)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_manual("", values = c("Mean" = "black", "Median" = "black")) +
+  scale_linetype_manual("", values = c("Mean" = 1, "Median" = 2)) +
+  geom_vline(data = essdat, aes(xintercept = value, colour = Measure, linetype = Measure)) +
+  labs(y = "Proportion of trials", x = "Total sample size", colour = NULL)
+```
+
+\clearpage
+
+
+```{r}
+bind_rows(
+  result_summary(dec2_null) %>% mutate(Scenario = "Null"),
+  result_summary(dec2_small) %>% mutate(Scenario = "Small"),
+  result_summary(dec2_moderate) %>% mutate(Scenario = "Moderate"),
+  result_summary(dec2_large) %>% mutate(Scenario = "Large")
+) %>%
+  select(Scenario, 1:5) %>%
+  kable(digits = 2, booktabs = T, caption = "Expected trial outcomes.") %>%
+  kable_styling(font_size = 9)
+```
+
+
+```{r, fig.cap="Expected trial progression under $(\\underline\\epsilon_t=0.05,\\overline\\epsilon_t=0.99,\\kappa_t=0.85,\\Delta=0.025)$."}
+bind_rows(
+  count_decide(dec2_null) %>% mutate(Scenario = "Null"),
+  count_decide(dec2_small) %>% mutate(Scenario = "Small"),
+  count_decide(dec2_moderate) %>% mutate(Scenario = "Moderate"),
+  count_decide(dec2_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large"))) %>%
+  ggplot(.,
+         aes(interim * 200, cp)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result, colour = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  labs(y = "Cumulative trial results", x = "Total sample size")
+```
+
+
+```{r, fig.cap="Distribution of trial sample sizes under $(\\underline\\epsilon_t=0.05,\\overline\\epsilon_t=0.99,\\kappa_t=0.85,\\Delta=0.025)$."}
+ssdat <- bind_rows(
+  count_ss(dec2_null) %>% mutate(Scenario = "Null"),
+  count_ss(dec2_small) %>% mutate(Scenario = "Small"),
+  count_ss(dec2_moderate) %>% mutate(Scenario = "Moderate"),
+  count_ss(dec2_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large")))
+essdat <- ssdat %>% 
+  group_by(Scenario) %>% 
+  summarise(Mean = sum(p*ss),
+            Median = median(rep.int(ss, n))) %>%
+  gather(Measure, value, -Scenario)
+
+ssdat %>%
+  ggplot(.,
+         aes(ss, p)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_manual("", values = c("Mean" = "black", "Median" = "black")) +
+  scale_linetype_manual("", values = c("Mean" = 1, "Median" = 2)) +
+  geom_vline(data = essdat, aes(xintercept = value, colour = Measure, linetype = Measure)) +
+  labs(y = "Proportion of trials", x = "Total sample size", colour = NULL)
+```
+
+\clearpage
+
+
+```{r}
+bind_rows(
+  result_summary(dec3_null) %>% mutate(Scenario = "Null"),
+  result_summary(dec3_small) %>% mutate(Scenario = "Small"),
+  result_summary(dec3_moderate) %>% mutate(Scenario = "Moderate"),
+  result_summary(dec3_large) %>% mutate(Scenario = "Large")
+) %>%
+  select(Scenario, 1:5) %>%
+  kable(digits = 2, booktabs = T, caption = "Expected trial outcomes.") %>%
+  kable_styling(font_size = 9)
+```
+
+
+```{r, fig.cap="Expected trial progression under $(\\underline\\epsilon_t=0.1,\\overline\\epsilon_t=0.99,\\kappa_t=0.8,\\Delta=0.025)$."}
+bind_rows(
+  count_decide(dec3_null) %>% mutate(Scenario = "Null"),
+  count_decide(dec3_small) %>% mutate(Scenario = "Small"),
+  count_decide(dec3_moderate) %>% mutate(Scenario = "Moderate"),
+  count_decide(dec3_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large"))) %>%
+  ggplot(.,
+         aes(interim * 200, cp)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result, colour = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  labs(y = "Cumulative trial results", x = "Total sample size")
+```
+
+
+```{r, fig.cap="Distribution of trial sample sizes under $(\\underline\\epsilon_t=0.1,\\overline\\epsilon_t=0.99,\\kappa_t=0.8,\\Delta=0.025)$."}
+ssdat <- bind_rows(
+  count_ss(dec3_null) %>% mutate(Scenario = "Null"),
+  count_ss(dec3_small) %>% mutate(Scenario = "Small"),
+  count_ss(dec3_moderate) %>% mutate(Scenario = "Moderate"),
+  count_ss(dec3_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large")))
+essdat <- ssdat %>% 
+  group_by(Scenario) %>% 
+  summarise(Mean = sum(p*ss),
+            Median = median(rep.int(ss, n))) %>%
+  gather(Measure, value, -Scenario)
+
+ssdat %>%
+  ggplot(.,
+         aes(ss, p)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_manual("", values = c("Mean" = "black", "Median" = "black")) +
+  scale_linetype_manual("", values = c("Mean" = 1, "Median" = 2)) +
+  geom_vline(data = essdat, aes(xintercept = value, colour = Measure, linetype = Measure)) +
+  labs(y = "Proportion of trials", x = "Total sample size", colour = NULL)
+```
+
+
+
+\clearpage
+
+
+```{r}
+bind_rows(
+  result_summary(dec4_null) %>% mutate(Scenario = "Null"),
+  result_summary(dec4_small) %>% mutate(Scenario = "Small"),
+  result_summary(dec4_moderate) %>% mutate(Scenario = "Moderate"),
+  result_summary(dec4_large) %>% mutate(Scenario = "Large")
+) %>%
+  select(Scenario, 1:5) %>%
+  kable(digits = 2, booktabs = T, caption = "Expected trial outcomes.") %>%
+  kable_styling(font_size = 9)
+```
+
+
+```{r, fig.cap="Expected trial progression under $(\\underline\\epsilon_t=0.1,\\overline\\epsilon_t=0.99,\\kappa_t=0.8,\\Delta=0.025)$."}
+bind_rows(
+  count_decide(dec4_null) %>% mutate(Scenario = "Null"),
+  count_decide(dec4_small) %>% mutate(Scenario = "Small"),
+  count_decide(dec4_moderate) %>% mutate(Scenario = "Moderate"),
+  count_decide(dec4_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large"))) %>%
+  ggplot(.,
+         aes(interim * 200, cp)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result, colour = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  labs(y = "Cumulative trial results", x = "Total sample size")
+```
+
+
+```{r, fig.cap="Distribution of trial sample sizes under $(\\underline\\epsilon_t=0.1,\\overline\\epsilon_t=0.99,\\kappa_t=0.8,\\Delta=0.025)$."}
+ssdat <- bind_rows(
+  count_ss(dec4_null) %>% mutate(Scenario = "Null"),
+  count_ss(dec4_small) %>% mutate(Scenario = "Small"),
+  count_ss(dec4_moderate) %>% mutate(Scenario = "Moderate"),
+  count_ss(dec4_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large")))
+essdat <- ssdat %>% 
+  group_by(Scenario) %>% 
+  summarise(Mean = sum(p*ss),
+            Median = median(rep.int(ss, n))) %>%
+  gather(Measure, value, -Scenario)
+
+ssdat %>%
+  ggplot(.,
+         aes(ss, p)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_manual("", values = c("Mean" = "black", "Median" = "black")) +
+  scale_linetype_manual("", values = c("Mean" = 1, "Median" = 2)) +
+  geom_vline(data = essdat, aes(xintercept = value, colour = Measure, linetype = Measure)) +
+  labs(y = "Proportion of trials", x = "Total sample size", colour = NULL)
+```
+
+
+
+\clearpage
+
+
+```{r}
+bind_rows(
+  result_summary(dec5_null) %>% mutate(Scenario = "Null"),
+  result_summary(dec5_small) %>% mutate(Scenario = "Small"),
+  result_summary(dec5_moderate) %>% mutate(Scenario = "Moderate"),
+  result_summary(dec5_large) %>% mutate(Scenario = "Large")
+) %>%
+  select(Scenario, 1:5) %>%
+  kable(digits = 2, booktabs = T, caption = "Expected trial outcomes.") %>%
+  kable_styling(font_size = 9)
+```
+
+
+```{r, fig.cap="Expected trial progression under $(\\underline\\epsilon_t=0.1,\\overline\\epsilon_t=0.99,\\kappa_t=0.8,\\Delta=0.025)$."}
+bind_rows(
+  count_decide(dec5_null) %>% mutate(Scenario = "Null"),
+  count_decide(dec5_small) %>% mutate(Scenario = "Small"),
+  count_decide(dec5_moderate) %>% mutate(Scenario = "Moderate"),
+  count_decide(dec5_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large"))) %>%
+  ggplot(.,
+         aes(interim * 200, cp)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result, colour = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  labs(y = "Cumulative trial results", x = "Total sample size")
+```
+
+
+```{r, fig.cap="Distribution of trial sample sizes under $(\\underline\\epsilon_t=0.1,\\overline\\epsilon_t=0.99,\\kappa_t=0.8,\\Delta=0.025)$."}
+ssdat <- bind_rows(
+  count_ss(dec5_null) %>% mutate(Scenario = "Null"),
+  count_ss(dec5_small) %>% mutate(Scenario = "Small"),
+  count_ss(dec5_moderate) %>% mutate(Scenario = "Moderate"),
+  count_ss(dec5_large) %>% mutate(Scenario = "Large")
+) %>%
+  mutate(Scenario = factor(Scenario, levels = c("Null", "Small", "Moderate", "Large")))
+essdat <- ssdat %>% 
+  group_by(Scenario) %>% 
+  summarise(Mean = sum(p*ss),
+            Median = median(rep.int(ss, n))) %>%
+  gather(Measure, value, -Scenario)
+
+ssdat %>%
+  ggplot(.,
+         aes(ss, p)) +
+  facet_wrap( ~ Scenario) +
+  geom_bar(aes(fill = result), stat = "identity") +
+  scale_fill_viridis_d("Trigger", begin = 0.15, end = 0.85, option = "A") +
+  scale_colour_manual("", values = c("Mean" = "black", "Median" = "black")) +
+  scale_linetype_manual("", values = c("Mean" = 1, "Median" = 2)) +
+  geom_vline(data = essdat, aes(xintercept = value, colour = Measure, linetype = Measure)) +
+  labs(y = "Proportion of trials", x = "Total sample size", colour = NULL)
+```
+
